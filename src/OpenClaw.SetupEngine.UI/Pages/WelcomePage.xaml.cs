@@ -35,6 +35,7 @@ public sealed partial class WelcomePage : Page
 
         InfoText.Text = "This local setup installs a small WSL Linux instance dedicated to OpenClaw. "
                       + "If you'd rather connect to an existing or remote gateway, choose Advanced setup.";
+        SetupPlanText.Text = BuildSetupPlanText(_config ?? new SetupConfig());
 
         StartLobsterBreatheAnimation();
     }
@@ -59,18 +60,20 @@ public sealed partial class WelcomePage : Page
 
     private async void StartButton_Click(object sender, RoutedEventArgs e)
     {
-        var dataDir = Environment.GetEnvironmentVariable("OPENCLAW_TRAY_DATA_DIR")
-            ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "OpenClawTray");
+        var config = _config!;
+        config.CleanBeforeRun = true;
 
-        var existing = ExistingConfigDetector.Detect(dataDir, _config!.DistroName);
+        var dataDir = SetupContext.ResolveDataDir();
+        var existing = ExistingConfigDetector.Detect(dataDir, config.DistroName);
         var summary = ExistingConfigDetector.BuildReplacementSummary(existing);
+        var content = summary + "\n\n" + BuildSetupPlanText(config);
 
         var dialog = new ContentDialog
         {
             Title = existing.HasLocalGateway || existing.HasDistro
                 ? "Replace existing WSL gateway?"
                 : "Install a new WSL gateway?",
-            Content = summary,
+            Content = content,
             PrimaryButtonText = "Continue",
             CloseButtonText = "Cancel",
             DefaultButton = ContentDialogButton.Close,
@@ -80,6 +83,18 @@ public sealed partial class WelcomePage : Page
         var result = await dialog.ShowAsync();
         if (result == ContentDialogResult.Primary)
             App.MainWindow?.NavigateToCapabilities();
+    }
+
+    private static string BuildSetupPlanText(SetupConfig config)
+    {
+        return string.Join(Environment.NewLine,
+        [
+            $"App data: {SetupContext.ResolveDataDir()}",
+            $"Local setup data: {SetupContext.ResolveLocalDataDir()}",
+            $"WSL distro: {config.DistroName}",
+            $"Gateway URL: {config.EffectiveGatewayUrl}",
+            $"Install mode: clean repair/reinstall"
+        ]);
     }
 
     private void AdvancedSetup_Click(object sender, RoutedEventArgs e)

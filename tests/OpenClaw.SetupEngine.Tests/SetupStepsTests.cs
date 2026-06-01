@@ -163,6 +163,28 @@ public class SetupStepsTests : IDisposable
     // ─── InstallCliStep: URL validation and quoting ───
 
     [Fact]
+    public void CleanupStaleDistro_ParseWslDistroList_ReturnsEmptyForNoInstalledDistributionsMessage()
+    {
+        var output = "Windows Subsystem for Linux has no installed distributions.\r\n"
+            + "Use 'wsl.exe --list --online' to list available distributions\r\n";
+
+        var distros = CleanupStaleDistroStep.ParseWslDistroList(output, "");
+
+        Assert.Empty(distros);
+    }
+
+    [Fact]
+    public void CleanupStaleDistro_BuildUnregisterFailureMessage_UsesStdoutWhenStderrIsEmpty()
+    {
+        var result = new CommandResult(1, "The specified distribution was not found.", "", TimeSpan.Zero, TimedOut: false);
+
+        var message = CleanupStaleDistroStep.BuildUnregisterFailureMessage(result);
+
+        Assert.Contains("exit 1", message);
+        Assert.Contains("The specified distribution was not found.", message);
+    }
+
+    [Fact]
     public async Task PreflightPort_Loopback_SucceedsForAvailablePort()
     {
         var port = GetFreeTcpPort();

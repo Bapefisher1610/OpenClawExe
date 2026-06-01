@@ -24,6 +24,9 @@ OutputBaseFilename=OpenClawTray-Setup-{#MyAppArch}
 Compression=lzma
 SolidCompression=yes
 WizardStyle=modern
+DisableDirPage=no
+DisableReadyPage=no
+UsePreviousAppDir=no
 PrivilegesRequired=lowest
 SetupIconFile=src\OpenClaw.Tray.WinUI\Assets\openclaw.ico
 UninstallDisplayIcon={app}\{#MyAppExeName}
@@ -49,19 +52,31 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 #endif
 
 [Tasks]
-Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
+Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"
 Name: "startupicon"; Description: "Start OpenClaw Tray when Windows starts"; GroupDescription: "Startup:"; Flags: unchecked
 Name: "cmdpalette"; Description: "Install PowerToys Command Palette extension"; GroupDescription: "Integrations:"; Flags: unchecked
 
 [Files]
 ; WinUI Tray app - include all files (WinUI needs DLLs, not single-file)
-Source: "{#publish}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs
+Source: "{#publish}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs; Excludes: "OpenClawData\*"
 ; Command Palette extension (all files from build output).
 ; skipifsourcedoesntexist: prevents ISCC compile error when the cmdpal publish
 ; dir is absent (e.g. developer builds that skip the cmdpalette task).
 Source: "{#publish}\cmdpal\*"; DestDir: "{app}\CommandPalette"; Flags: ignoreversion recursesubdirs skipifsourcedoesntexist; Tasks: cmdpalette
 ; WSL gateway uninstall helper — invoked by [UninstallRun] to drive clean removal
 Source: "scripts\Uninstall-LocalGateway.ps1"; DestDir: "{app}"; Flags: ignoreversion
+
+[InstallDelete]
+; Optional reinstall path for testers/dev builds: clear persisted tray setup
+; state so the app's startup gate opens SetupEngine.UI as a first-run wizard.
+Type: files; Name: "{userappdata}\OpenClawTray\settings.json"; Check: ShouldResetSetupState
+Type: files; Name: "{userappdata}\OpenClawTray\gateways.json"; Check: ShouldResetSetupState
+Type: files; Name: "{userappdata}\OpenClawTray\device-key-ed25519.json"; Check: ShouldResetSetupState
+Type: filesandordirs; Name: "{userappdata}\OpenClawTray\gateways"; Check: ShouldResetSetupState
+Type: files; Name: "{userappdata}\OpenClawTray\setup.lock"; Check: ShouldResetSetupState
+Type: files; Name: "{userappdata}\OpenClawTray\setup-state.json"; Check: ShouldResetSetupState
+Type: files; Name: "{localappdata}\OpenClawTray\setup-state.json"; Check: ShouldResetSetupState
+Type: files; Name: "{localappdata}\OpenClawTray\run.marker"; Check: ShouldResetSetupState
 
 [Icons]
 Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"
@@ -70,7 +85,13 @@ Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: de
 Name: "{userstartup}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: startupicon
 
 [Run]
-Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#StringChange(MyAppName, '&', '&&')}}"; Flags: nowait postinstall skipifsilent
+; Fresh/reinstall path: after Inno has shown the install-folder page and copied
+; files into {app}, run the setup engine directly so WSL/OAuth setup cannot be
+; skipped by stale tray cache.
+Filename: "{app}\SetupEngine\OpenClaw.SetupEngine.UI.exe"; Flags: nowait; Check: ShouldRunSetupEngineAfterInstall
+; Normal update path: keep the previous behavior when the user explicitly does
+; not reset setup state.
+Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#StringChange(MyAppName, '&', '&&')}}"; Flags: nowait postinstall skipifsilent; Check: ShouldLaunchTrayAfterInstall
 ; Register Command Palette extension (silently, only if task selected)
 Filename: "powershell.exe"; Parameters: "-ExecutionPolicy Bypass -Command ""Add-AppxPackage -Register '{app}\CommandPalette\AppxManifest.xml' -ForceApplicationShutdown"""; Flags: runhidden; Tasks: cmdpalette
 
@@ -88,3 +109,35 @@ Filename: "powershell.exe"; Parameters: "-ExecutionPolicy Bypass -Command ""Add-
 Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\Uninstall-LocalGateway.ps1"""; Flags: shellexec waituntilterminated runhidden; StatusMsg: "Removing local WSL gateway..."
 ; Unregister Command Palette extension on uninstall
 Filename: "powershell.exe"; Parameters: "-ExecutionPolicy Bypass -Command ""Get-AppxPackage -Name '*OpenClaw*' | Remove-AppxPackage"""; Flags: runhidden
+
+[Code]
+var
+  SetupOptionsPage: TInputOptionWizardPage;
+
+procedure InitializeWizard;
+begin
+  SetupOptionsPage := CreateInputOptionPage(
+    wpSelectDir,
+    'Setup options',
+    'Choose how OpenClaw starts after install.',
+    'Select the reset option when you want this install to behave like a first-time setup.',
+    False,
+    False);
+  SetupOptionsPage.Add('Reset setup state and show setup wizard again');
+  SetupOptionsPage.Values[0] := True;
+end;
+
+function ShouldResetSetupState: Boolean;
+begin
+  Result := SetupOptionsPage.Values[0];
+end;
+
+function ShouldRunSetupEngineAfterInstall: Boolean;
+begin
+  Result := (not WizardSilent) and ShouldResetSetupState;
+end;
+
+function ShouldLaunchTrayAfterInstall: Boolean;
+begin
+  Result := not ShouldResetSetupState;
+end;

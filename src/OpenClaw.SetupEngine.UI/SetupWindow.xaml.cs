@@ -74,8 +74,15 @@ public sealed partial class SetupWindow : Window
     public void NavigateToProgress() => RootFrame.Navigate(typeof(ProgressPage), _config);
     public void NavigateToWizard() => RootFrame.Navigate(typeof(WizardPage), _config);
     public void NavigateToPermissions() => RootFrame.Navigate(typeof(PermissionsPage), _config);
-    public void NavigateToComplete(bool success, TimeSpan elapsed, string? logPath, string? errorMessage = null)
-        => RootFrame.Navigate(typeof(CompletePage), new CompletePageArgs(success, elapsed, logPath, errorMessage));
+    public void NavigateToComplete(
+        bool success,
+        TimeSpan elapsed,
+        string? logPath,
+        string? errorMessage = null,
+        bool autoLaunchTray = false)
+        => RootFrame.Navigate(
+            typeof(CompletePage),
+            new CompletePageArgs(success, elapsed, logPath, errorMessage, autoLaunchTray, _config.EffectiveGatewayUrl));
 
     public void BringToFrontForSetupLaunch()
     {
@@ -114,4 +121,10 @@ public sealed partial class SetupWindow : Window
         => args.Any(a => a.Equals(name, StringComparison.OrdinalIgnoreCase));
 }
 
-public sealed record CompletePageArgs(bool Success, TimeSpan Elapsed, string? LogPath, string? ErrorMessage = null);
+public sealed record CompletePageArgs(
+    bool Success,
+    TimeSpan Elapsed,
+    string? LogPath,
+    string? ErrorMessage = null,
+    bool AutoLaunchTray = false,
+    string? GatewayUrl = null);

@@ -46,6 +46,7 @@ public static class SetupStepFactory
             new CleanupStaleGatewayStep(),
             new PreflightOsStep(),
             new PreflightWslStep(),
+            new PreflightDiskSpaceStep(),
             new PreflightPortStep(),
             new CreateWslInstanceStep(),
             new ConfigureWslInstanceStep(),

@@ -1,6 +1,7 @@
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Input;
+using Microsoft.UI.Xaml.Media;
 using OpenClaw.Shared;
 using OpenClawTray.Helpers;
 using OpenClawTray.Pages;
@@ -49,6 +50,8 @@ public sealed partial class HubWindow : WindowEx
     public string? PendingChatSessionKey { get; set; }
     public string? NodeFullDeviceId { get; set; }
     private Microsoft.UI.Dispatching.DispatcherQueueTimer? _gatewayNavHideTimer;
+    private NavigationViewItem NavAIProvider = null!;
+    private bool _aiProviderNavigationQueued;
 
     // Cached gateway data — pages read these on navigation
     public SessionInfo[]? LastSessions { get; private set; }
@@ -75,6 +78,7 @@ public sealed partial class HubWindow : WindowEx
     public HubWindow()
     {
         InitializeComponent();
+        InsertAIProviderNavItem();
         ApplyHighContrastFallbackIfNeeded();
         ExtendsContentIntoTitleBar = true;
         SetTitleBar(AppTitleBar);
@@ -91,6 +95,30 @@ public sealed partial class HubWindow : WindowEx
         this.SetIcon(IconHelper.GetStatusIconPath(ConnectionStatus.Connected));
 
         RootGrid.SizeChanged += OnRootGridSizeChanged;
+        NavView.AddHandler(UIElement.PointerReleasedEvent, new PointerEventHandler(OnNavViewPointerReleased), true);
+    }
+
+    private void InsertAIProviderNavItem()
+    {
+        if (NavAIProvider != null)
+            return;
+
+        NavAIProvider = new NavigationViewItem
+        {
+            Content = "AI Provider",
+            Tag = "aiprovider",
+            SelectsOnInvoked = true,
+            Icon = new ImageIcon
+            {
+                Source = (ImageSource)NavView.Resources["Usage_Icon"]
+            }
+        };
+
+        NavAIProvider.AddHandler(UIElement.PointerReleasedEvent, new PointerEventHandler(OnAIProviderNavPointerReleased), true);
+
+        var skillsIndex = NavView.MenuItems.IndexOf(NavSkills);
+        var insertIndex = skillsIndex >= 0 ? skillsIndex + 1 : NavView.MenuItems.Count;
+        NavView.MenuItems.Insert(insertIndex, NavAIProvider);
     }
 
     /// <summary>
@@ -261,6 +289,7 @@ public sealed partial class HubWindow : WindowEx
         if (tag == "home" || tag == "general") return "connection";
         if (tag == "about") return "info";
         if (tag == "nodes") return "instances";
+        if (tag == "ai-provider" || tag == "ai" || tag == "providers") return "aiprovider";
         // Map legacy agent-scoped workspace/cron tags
         if (tag == "cron") return $"agent:{_currentAgentId}:cron";
         if (tag == "workspace") return $"agent:{_currentAgentId}:workspace";
@@ -442,6 +471,9 @@ public sealed partial class HubWindow : WindowEx
             NavChat.Visibility = vis;
             NavSessions.Visibility = vis;
             NavSkills.Visibility = vis;
+            NavAIProvider.Visibility = keepCurrentGatewayPageVisible && string.Equals(currentTag, "aiprovider", StringComparison.OrdinalIgnoreCase)
+                ? Visibility.Visible
+                : vis;
             NavChannels.Visibility = vis;
             NavInstances.Visibility = vis;
             NavCron.Visibility = vis;
@@ -453,7 +485,7 @@ public sealed partial class HubWindow : WindowEx
                 if (keepCurrentGatewayPageVisible)
                     return;
 
-                var gatewayTags = new HashSet<string> { "chat", "sessions", "skills", "channels", "instances", "agentevents", "bindings", "config", "usage", "cron", "workspace" };
+                var gatewayTags = new HashSet<string> { "chat", "sessions", "skills", "aiprovider", "channels", "instances", "agentevents", "bindings", "config", "usage", "cron", "workspace" };
                 if (currentTag != null && (gatewayTags.Contains(currentTag) || currentTag.StartsWith("agent:")))
                 {
                     foreach (NavigationViewItem item in NavView.MenuItems.OfType<NavigationViewItem>())
@@ -519,6 +551,71 @@ public sealed partial class HubWindow : WindowEx
         }
     }
 
+    private void NavView_ItemInvoked(NavigationView sender, NavigationViewItemInvokedEventArgs args)
+    {
+        if (_syncingNavSelection)
+            return;
+
+        if (args.InvokedItemContainer is NavigationViewItem { Tag: string tag })
+        {
+            NavigateInternal(NormalizeNavTag(tag));
+        }
+    }
+
+    private void OnAIProviderNavPointerReleased(object sender, PointerRoutedEventArgs args)
+    {
+        ForceNavigateAIProvider();
+        args.Handled = true;
+    }
+
+    private void ForceNavigateAIProvider()
+    {
+        if (_aiProviderNavigationQueued)
+            return;
+
+        _aiProviderNavigationQueued = true;
+        DispatcherQueue?.TryEnqueue(() =>
+        {
+            try
+            {
+                NavigateInternal("aiprovider");
+            }
+            catch (Exception ex)
+            {
+                Services.Logger.Error($"[HubWindow] AI Provider navigation failed: {ex}");
+                ShowNavigationErrorPage(typeof(AIProviderPage), ex);
+            }
+            finally
+            {
+                _aiProviderNavigationQueued = false;
+            }
+        });
+    }
+
+    private void OnNavViewPointerReleased(object sender, PointerRoutedEventArgs args)
+    {
+        if (_syncingNavSelection)
+            return;
+
+        if (FindNavItemFromOriginalSource(args.OriginalSource as DependencyObject) is { Tag: string tag })
+        {
+            NavigateInternal(NormalizeNavTag(tag));
+        }
+    }
+
+    private static NavigationViewItem? FindNavItemFromOriginalSource(DependencyObject? source)
+    {
+        while (source != null)
+        {
+            if (source is NavigationViewItem item)
+                return item;
+
+            source = VisualTreeHelper.GetParent(source);
+        }
+
+        return null;
+    }
+
     /// <summary>
     /// Authoritative post-navigation hook. Runs for every successful
     /// Frame.Navigate, so it's the single place that rebuilds
@@ -545,6 +642,47 @@ public sealed partial class HubWindow : WindowEx
         }
 
         InitializeCurrentPage();
+    }
+
+    private void OnContentFrameNavigationFailed(object sender, Microsoft.UI.Xaml.Navigation.NavigationFailedEventArgs e)
+    {
+        var message = $"[HubWindow] Navigation failed for {e.SourcePageType?.FullName}: {e.Exception}";
+        Services.Logger.Error(message);
+        e.Handled = true;
+        ShowNavigationErrorPage(e.SourcePageType, e.Exception);
+    }
+
+    private void ShowNavigationErrorPage(Type? pageType, Exception exception)
+    {
+        var title = pageType == typeof(AIProviderPage)
+            ? "AI Provider"
+            : "Navigation error";
+
+        ContentFrame.Content = new ScrollViewer
+        {
+            VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+            Content = new StackPanel
+            {
+                Padding = new Thickness(24),
+                Spacing = 12,
+                Children =
+                {
+                    new TextBlock
+                    {
+                        Text = title,
+                        Style = (Style)Application.Current.Resources["TitleTextBlockStyle"]
+                    },
+                    new InfoBar
+                    {
+                        IsOpen = true,
+                        IsClosable = false,
+                        Severity = InfoBarSeverity.Error,
+                        Title = "This page could not be opened",
+                        Message = exception.Message
+                    }
+                }
+            }
+        };
     }
 
     /// <summary>
@@ -611,6 +749,7 @@ public sealed partial class HubWindow : WindowEx
                 workspace.Initialize();
                 break;
             case BindingsPage bindings: bindings.Initialize(); break;
+            case AIProviderPage aiProvider: aiProvider.Initialize(); break;
             case SettingsPage settings: settings.Initialize(); break;
             case DebugPage debug: debug.Initialize(); break;
             case AboutPage about: about.Initialize(); break;
@@ -632,6 +771,7 @@ public sealed partial class HubWindow : WindowEx
         "nodes" => typeof(InstancesPage),
         "instances" => typeof(InstancesPage),
         "config" => typeof(ConfigPage),
+        "aiprovider" => typeof(AIProviderPage),
         "usage" => typeof(UsagePage),
         "bindings" => typeof(BindingsPage),
         "capabilities" => typeof(PermissionsPage),

@@ -53,7 +53,9 @@ public class GatewayNavVisibilityDebouncePolicyTests
     [Theory]
     [InlineData("config")]
     [InlineData("CONFIG")]
-    public void ConfigPage_RemainsVisibleDuringDisconnect(string tag)
+    [InlineData("aiprovider")]
+    [InlineData("AIPROVIDER")]
+    public void RepairPages_RemainVisibleDuringDisconnect(string tag)
     {
         Assert.True(GatewayNavVisibilityDebouncePolicy.ShouldKeepCurrentPageVisibleDuringDisconnect(tag));
     }
@@ -61,6 +63,7 @@ public class GatewayNavVisibilityDebouncePolicyTests
     [Theory]
     [InlineData("connection")]
     [InlineData("channels")]
+    [InlineData("usage")]
     [InlineData(null)]
     public void OtherPages_DoNotOptOutOfDisconnectNavigation(string? tag)
     {

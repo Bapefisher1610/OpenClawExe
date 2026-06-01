@@ -24,7 +24,7 @@ public sealed partial class ProgressPage : Page
     private static readonly (string GroupId, string DisplayName, string[] StepIds)[] StepGroups =
     [
         ("cleanup", "Removing existing gateway", ["cleanup-distro", "cleanup-gateway"]),
-        ("preflight", "Check system", ["preflight-os", "preflight-wsl", "preflight-port"]),
+        ("preflight", "Check system", ["preflight-os", "preflight-wsl", "preflight-disk", "preflight-port"]),
         ("wsl-create", "Installing Ubuntu", ["wsl-create"]),
         ("wsl-configure", "Configuring instance", ["wsl-configure", "validate-wsl-lockdown"]),
         ("install-cli", "Installing OpenClaw", ["install-cli"]),
@@ -106,7 +106,7 @@ public sealed partial class ProgressPage : Page
                     App.MainWindow?.NavigateToWizard();
                 }
                 else if (config.SkipPermissions)
-                    App.MainWindow?.NavigateToComplete(true, sw.Elapsed, config.LogPath);
+                    App.MainWindow?.NavigateToComplete(true, sw.Elapsed, config.LogPath, autoLaunchTray: true);
                 else
                     App.MainWindow?.NavigateToPermissions();
             }

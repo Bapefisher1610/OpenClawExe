@@ -146,7 +146,7 @@ public sealed partial class PermissionsPage : Page
         => App.MainWindow?.NavigateToWizard();
 
     private void Next_Click(object sender, RoutedEventArgs e)
-        => App.MainWindow?.NavigateToComplete(true, TimeSpan.Zero, null);
+        => App.MainWindow?.NavigateToComplete(true, TimeSpan.Zero, null, autoLaunchTray: true);
 
     // ── Permission checks (passive, no OS consent dialogs) ──
 

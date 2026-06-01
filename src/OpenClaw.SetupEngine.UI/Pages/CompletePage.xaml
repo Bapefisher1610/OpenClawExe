@@ -5,7 +5,11 @@
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
     NavigationCacheMode="Disabled">
 
-    <Grid RowDefinitions="*,Auto" Padding="56,40,56,32">
+    <Grid Padding="56,40,56,32">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="*" />
+            <RowDefinition Height="Auto" />
+        </Grid.RowDefinitions>
 
         <!-- Main content -->
         <StackPanel Grid.Row="0" VerticalAlignment="Center" Spacing="12"
@@ -64,7 +68,11 @@
             </Border>
 
             <!-- Launch at startup toggle -->
-            <Grid x:Name="StartupRow" ColumnDefinitions="*,Auto" Margin="0,24,0,0">
+            <Grid x:Name="StartupRow" Margin="0,24,0,0">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
                 <TextBlock Text="Launch OpenClaw at startup?" FontSize="14"
                            VerticalAlignment="Center" Grid.Column="0" />
                 <ToggleSwitch x:Name="StartupToggle" Grid.Column="1"

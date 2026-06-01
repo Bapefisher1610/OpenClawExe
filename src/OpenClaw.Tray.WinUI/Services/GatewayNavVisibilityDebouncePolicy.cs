@@ -28,5 +28,6 @@ internal static class GatewayNavVisibilityDebouncePolicy
         status != ConnectionStatus.Connected;
 
     public static bool ShouldKeepCurrentPageVisibleDuringDisconnect(string? currentTag) =>
-        string.Equals(currentTag, "config", StringComparison.OrdinalIgnoreCase);
+        string.Equals(currentTag, "config", StringComparison.OrdinalIgnoreCase) ||
+        string.Equals(currentTag, "aiprovider", StringComparison.OrdinalIgnoreCase);
 }

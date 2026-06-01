@@ -5,7 +5,12 @@
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
     NavigationCacheMode="Disabled">
 
-    <Grid RowDefinitions="Auto,*,Auto" Padding="56,64,56,40">
+    <Grid Padding="56,64,56,40">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+            <RowDefinition Height="Auto" />
+        </Grid.RowDefinitions>
 
         <!-- Top: Logo + Title + Description -->
         <StackPanel Grid.Row="0" HorizontalAlignment="Center" Spacing="12">
@@ -27,21 +32,29 @@
 
             <!-- Info card -->
             <Border x:Name="InfoCard" CornerRadius="8" Padding="20,18,20,18">
-                <Grid ColumnDefinitions="Auto,*" ColumnSpacing="12">
+                <Grid ColumnSpacing="12">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto" />
+                        <ColumnDefinition Width="*" />
+                    </Grid.ColumnDefinitions>
                     <Border Width="22" Height="22" CornerRadius="11"
                             Background="#60C8F8" VerticalAlignment="Top">
                         <TextBlock Text="i" FontSize="13" FontWeight="SemiBold"
                                    Foreground="Black"
                                    HorizontalAlignment="Center" VerticalAlignment="Center" />
                     </Border>
-                    <TextBlock x:Name="InfoText" Grid.Column="1" TextWrapping="Wrap" FontSize="13"
-                               Opacity="0.85" />
+                    <StackPanel Grid.Column="1" Spacing="8">
+                        <TextBlock x:Name="InfoText" TextWrapping="Wrap" FontSize="13"
+                                   Opacity="0.85" />
+                        <TextBlock x:Name="SetupPlanText" TextWrapping="Wrap" FontSize="12"
+                                   Opacity="0.75" FontFamily="Cascadia Code,Consolas,monospace" />
+                    </StackPanel>
                 </Grid>
             </Border>
 
             <!-- Start button -->
             <Button x:Name="StartButton"
-                    Content="Install new WSL Gateway"
+                    Content="Install or repair WSL Gateway"
                     HorizontalAlignment="Stretch"
                     Height="44" FontSize="15" FontWeight="SemiBold"
                     Click="StartButton_Click">

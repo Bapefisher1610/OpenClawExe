@@ -60,8 +60,9 @@ public class SetupPipelineTests
     {
         var steps = SetupStepFactory.BuildDefaultSteps();
 
-        Assert.Equal(18, steps.Count);
+        Assert.Equal(19, steps.Count);
         Assert.Contains(steps, s => s is ValidateWslLockdownStep);
+        Assert.Contains(steps, s => s is PreflightDiskSpaceStep);
         Assert.Contains(steps, s => s is RunGatewayWizardStep);
         Assert.IsType<StartKeepaliveStep>(steps[^1]);
     }

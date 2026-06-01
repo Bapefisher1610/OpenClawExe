@@ -10,6 +10,10 @@ namespace OpenClaw.SetupEngine.UI.Pages;
 public sealed partial class CompletePage : Page
 {
     private string? _logPath;
+    private string? _gatewayUrl;
+    private bool _success;
+    private bool _autoLaunchTray;
+    private bool _trayLaunchStarted;
 
     public CompletePage()
     {
@@ -22,17 +26,23 @@ public sealed partial class CompletePage : Page
         if (e.Parameter is CompletePageArgs args)
         {
             _logPath = args.LogPath;
+            _gatewayUrl = args.GatewayUrl;
 
             if (args.Success)
             {
+                _success = true;
+                _autoLaunchTray = args.AutoLaunchTray;
                 SuccessIcon.Visibility = Visibility.Visible;
                 FailureIcon.Visibility = Visibility.Collapsed;
                 TitleText.Text = "All set!";
-                SubtitleText.Text = "OpenClaw is ready to go";
+                SubtitleText.Text = $"OpenClaw is ready. Opening Windows tray for {DisplayGatewayUrl(_gatewayUrl)}...";
                 ErrorCard.Visibility = Visibility.Collapsed;
+                LaunchButton.Content = "Close Setup";
             }
             else
             {
+                _success = false;
+                _autoLaunchTray = false;
                 SuccessIcon.Visibility = Visibility.Collapsed;
                 FailureIcon.Visibility = Visibility.Visible;
                 TitleText.Text = "Setup failed";
@@ -62,6 +72,12 @@ public sealed partial class CompletePage : Page
 
         // Default startup toggle to off (user can enable)
         StartupToggle.IsOn = false;
+
+        if (_autoLaunchTray && !_trayLaunchStarted)
+        {
+            _trayLaunchStarted = true;
+            _ = LaunchTrayAfterSuccessAsync();
+        }
     }
 
     private void LaunchButton_Click(object sender, RoutedEventArgs e)
@@ -70,10 +86,23 @@ public sealed partial class CompletePage : Page
         if (StartupToggle.Visibility == Visibility.Visible && StartupToggle.IsOn)
             RegisterStartup();
 
-        // Launch tray on success, just close on failure
-        if (LaunchButton.Content?.ToString() != "Close")
+        if (_success && !_trayLaunchStarted)
             LaunchTray();
         App.MainWindow?.Close();
+    }
+
+    private async Task LaunchTrayAfterSuccessAsync()
+    {
+        await Task.Delay(900);
+        try
+        {
+            LaunchTray();
+            SubtitleText.Text = $"Windows tray opened and connecting to {DisplayGatewayUrl(_gatewayUrl)}.";
+        }
+        catch (Exception ex)
+        {
+            SubtitleText.Text = $"Setup complete, but Windows tray did not open automatically: {ex.Message}";
+        }
     }
 
     private void ViewLog_Click(object sender, RoutedEventArgs e)
@@ -82,7 +111,7 @@ public sealed partial class CompletePage : Page
             Process.Start(new ProcessStartInfo(_logPath) { UseShellExecute = true });
     }
 
-    private static void LaunchTray()
+    internal static void LaunchTray()
     {
         // Kill any existing tray instances so fresh one picks up new gateway
         foreach (var proc in Process.GetProcessesByName("OpenClaw.Tray.WinUI"))
@@ -94,7 +123,28 @@ public sealed partial class CompletePage : Page
         Thread.Sleep(1000);
 
         // Launch via protocol deep link — opens tray and navigates to chat
-        Process.Start(new ProcessStartInfo("openclaw://chat") { UseShellExecute = true });
+        try
+        {
+            Process.Start(new ProcessStartInfo("openclaw://chat") { UseShellExecute = true });
+            return;
+        }
+        catch
+        {
+        }
+
+        var candidates = new[]
+        {
+            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "OpenClawTray", "OpenClaw.Tray.WinUI.exe"),
+            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Programs", "OpenClawTray", "OpenClaw.Tray.WinUI.exe"),
+            Path.Combine(AppContext.BaseDirectory, "OpenClaw.Tray.WinUI.exe"),
+            Path.Combine(AppContext.BaseDirectory, "..", "OpenClaw.Tray.WinUI", "OpenClaw.Tray.WinUI.exe"),
+        };
+
+        var trayPath = candidates.FirstOrDefault(File.Exists);
+        if (trayPath == null)
+            throw new FileNotFoundException("OpenClaw.Tray.WinUI.exe was not found.");
+
+        Process.Start(new ProcessStartInfo(trayPath, "openclaw://chat") { UseShellExecute = true });
     }
 
     private static void RegisterStartup()
@@ -116,4 +166,7 @@ public sealed partial class CompletePage : Page
         }
         catch { /* best effort */ }
     }
+
+    private static string DisplayGatewayUrl(string? gatewayUrl)
+        => string.IsNullOrWhiteSpace(gatewayUrl) ? "the local gateway" : gatewayUrl;
 }

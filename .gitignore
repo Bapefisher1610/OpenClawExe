@@ -350,6 +350,15 @@ test_ws.py
 # Local visual test output
 visual-test-output/
 
+# Local build, restore, and runtime artifacts
+.nuget/
+.run-data/
+.run-data-release/
+.test-data/
+.tools/
+publish-x64/
+publish-installer-x64/
+
 # Local squad agent state
 .squad/
 

@@ -31,6 +31,21 @@ public class ApprovalRequestHelperTests
     }
 
     [Fact]
+    public void PairNodeStep_UsesDeviceApprovalForRoleUpgradeRequest()
+    {
+        Assert.Equal("device.pair.approve", PairNodeStep.NodeRoleUpgradeApprovalMethod);
+    }
+
+    [Fact]
+    public void PairNodeStep_KeepsNodeApprovalCliFallback()
+    {
+        var command = PairNodeStep.BuildNodeApprovalCommand();
+
+        Assert.Contains("openclaw nodes approve", command);
+        Assert.DoesNotContain("devices approve", command);
+    }
+
+    [Fact]
     public void TryReadSinglePendingRequestId_ReturnsOnlySafePendingRequest()
     {
         var result = ApprovalRequestHelper.TryReadSinglePendingRequestId("""

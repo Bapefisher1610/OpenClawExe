@@ -111,7 +111,8 @@
                 PaneDisplayMode="Left"
                 PaneOpening="OnNavPaneStateChanged"
                 PaneClosing="OnNavPaneStateChanged"
-                SelectionChanged="NavView_SelectionChanged">
+                SelectionChanged="NavView_SelectionChanged"
+                ItemInvoked="NavView_ItemInvoked">
 
             <NavigationView.Resources>
                 <!-- Match Windows 11 Settings: ~22px colorful icons in a default-height row.
@@ -227,7 +228,9 @@
             </NavigationViewItem>
             </NavigationView.FooterMenuItems>
 
-            <Frame x:Name="ContentFrame" Navigated="OnContentFrameNavigated">
+            <Frame x:Name="ContentFrame"
+                   Navigated="OnContentFrameNavigated"
+                   NavigationFailed="OnContentFrameNavigationFailed">
                 <Frame.ContentTransitions>
                     <TransitionCollection>
                         <NavigationThemeTransition/>

@@ -48,4 +48,11 @@
              CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
+  <Target Name="CopyAppPriToPublishDirectory" AfterTargets="Publish"
+          Condition="'$(PublishDir)' != ''">
+    <Copy SourceFiles="$(TargetDir)$(AssemblyName).pri"
+          DestinationFiles="$(PublishDir)$(AssemblyName).pri"
+          Condition="Exists('$(TargetDir)$(AssemblyName).pri')" />
+  </Target>
+
 </Project>

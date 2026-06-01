@@ -36,6 +36,8 @@ public partial class App : Application, OpenClawTray.Services.IAppCommands
     {
         FetchOnlyLatestRelease = true,
         InstallUpdateSingleFileExecutableName = "OpenClaw.Tray.WinUI",
+        InstallUpdateWindowsExeType = UpdatumWindowsExeType.Installer,
+        InstallUpdateWindowsInstallerArguments = "/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /MERGETASKS=desktopicon",
     };
 
     private TrayIcon? _trayIcon;
@@ -343,6 +345,59 @@ public partial class App : Application, OpenClawTray.Services.IAppCommands
 
     private void OnUiThread(Microsoft.UI.Dispatching.DispatcherQueueHandler action) => _dispatcherQueue?.TryEnqueue(action);
 
+    private static void EnsureDesktopShortcut()
+    {
+        if (DataDirOverride is not null)
+            return;
+
+        try
+        {
+            var desktop = Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory);
+            if (string.IsNullOrWhiteSpace(desktop) || !Directory.Exists(desktop))
+                return;
+
+            var shortcutPath = Path.Combine(desktop, "OpenClaw Tray.lnk");
+            if (File.Exists(shortcutPath))
+                return;
+
+            var exePath = Environment.ProcessPath;
+            if (string.IsNullOrWhiteSpace(exePath) || !File.Exists(exePath))
+                return;
+
+            var shellType = Type.GetTypeFromProgID("WScript.Shell");
+            if (shellType is null)
+                return;
+
+            object? shell = null;
+            object? shortcut = null;
+            try
+            {
+                shell = Activator.CreateInstance(shellType);
+                if (shell is null)
+                    return;
+
+                shortcut = ((dynamic)shell).CreateShortcut(shortcutPath);
+                ((dynamic)shortcut).TargetPath = exePath;
+                ((dynamic)shortcut).WorkingDirectory = Path.GetDirectoryName(exePath) ?? string.Empty;
+                ((dynamic)shortcut).IconLocation = exePath;
+                ((dynamic)shortcut).Description = "OpenClaw Tray";
+                ((dynamic)shortcut).Save();
+                Logger.Info($"[Shortcut] Created desktop shortcut: {shortcutPath}");
+            }
+            finally
+            {
+                if (shortcut is not null && Marshal.IsComObject(shortcut))
+                    Marshal.FinalReleaseComObject(shortcut);
+                if (shell is not null && Marshal.IsComObject(shell))
+                    Marshal.FinalReleaseComObject(shell);
+            }
+        }
+        catch (Exception ex)
+        {
+            Logger.Warn($"[Shortcut] Desktop shortcut creation skipped: {ex.Message}");
+        }
+    }
+
     /// <summary>
     /// Check if the app was launched via protocol activation (MSIX deep link).
     /// In WinUI 3, protocol activation is retrieved via AppInstance, not OnActivated.
@@ -423,6 +478,9 @@ public partial class App : Application, OpenClawTray.Services.IAppCommands
         // Initialize settings before update check so skip selections can be remembered.
         _settings = new SettingsManager();
         _previousSettingsSnapshot = _settings.ToSettingsData().ToConnectionSnapshot();
+        _gatewayRegistry = new GatewayRegistry(SettingsManager.SettingsDirectoryPath);
+        _gatewayRegistry.Load();
+        var setupRequiredAtStartup = RequiresSetup(_settings);
         _chatCoordinator = new OpenClawTray.Chat.OpenClawChatCoordinator(
             _settings,
             () => _nodeService,
@@ -453,10 +511,12 @@ public partial class App : Application, OpenClawTray.Services.IAppCommands
 
         // Register URI scheme on first run
         DeepLinkHandler.RegisterUriScheme();
+        EnsureDesktopShortcut();
 
         // Check for updates before launching. Skip in test instances — no UI dialogs,
         // no network calls, no startup delay.
-        if (DataDirOverride is null &&
+        if (!setupRequiredAtStartup &&
+            DataDirOverride is null &&
             Environment.GetEnvironmentVariable("OPENCLAW_SKIP_UPDATE_CHECK") != "1")
         {
             var shouldLaunch = await CheckForUpdatesAsync();
@@ -486,8 +546,6 @@ public partial class App : Application, OpenClawTray.Services.IAppCommands
         ShowSurfaceImprovementsTipIfNeeded();
 
         // Initialize connection manager before setup flow.
-        _gatewayRegistry = new GatewayRegistry(SettingsManager.SettingsDirectoryPath);
-        _gatewayRegistry.Load();
         var credentialResolver = new CredentialResolver(DeviceIdentityFileReader.Instance);
         var clientFactory = new GatewayClientFactory();
         var appLogger = new AppLogger();
@@ -566,7 +624,7 @@ public partial class App : Application, OpenClawTray.Services.IAppCommands
         // down the tray; user can retry via the Setup Guide menu item.
         try
         {
-            if (RequiresSetup(_settings) ||
+            if (setupRequiredAtStartup ||
                 Environment.GetEnvironmentVariable("OPENCLAW_FORCE_ONBOARDING") == "1")
             {
                 await ShowOnboardingAsync();
@@ -670,6 +728,12 @@ public partial class App : Application, OpenClawTray.Services.IAppCommands
 
     private void OnTrayIconSelected(TrayIcon sender, TrayIconEventArgs e)
     {
+        if (_settings != null && RequiresSetup(_settings))
+        {
+            _ = ShowOnboardingAsync();
+            return;
+        }
+
         if (_connectionManager?.CurrentSnapshot.OperatorState == RoleConnectionState.Connected)
         {
             ShowChatWindow();
@@ -2998,7 +3062,16 @@ public partial class App : Application, OpenClawTray.Services.IAppCommands
             var process = System.Diagnostics.Process.Start(psi);
             if (process != null)
             {
-                await Task.Delay(500);
+                await Task.Delay(1500);
+                process.Refresh();
+                if (process.HasExited)
+                {
+                    Logger.Error($"SetupEngine.UI exited immediately with code {process.ExitCode}; opening Connection page fallback");
+                    process.Dispose();
+                    ShowHub("connection");
+                    return;
+                }
+
                 TryBringSetupEngineToFront(process);
                 process.Dispose();
             }
@@ -3007,6 +3080,7 @@ public partial class App : Application, OpenClawTray.Services.IAppCommands
         catch (Exception ex)
         {
             Logger.Error($"Failed to launch SetupEngine.UI: {ex.Message}");
+            ShowHub("connection");
         }
     }
 
@@ -3481,7 +3555,7 @@ public partial class App : Application, OpenClawTray.Services.IAppCommands
                 return !installed; // Don't launch if update succeeded
             }
 
-            if (result == UpdateDialogResult.Skip && _settings != null)
+            if ((result == UpdateDialogResult.Skip || result == UpdateDialogResult.RemindLater) && _settings != null)
             {
                 _settings.SkippedUpdateTag = releaseTag;
                 _settings.Save();
@@ -3491,7 +3565,7 @@ public partial class App : Application, OpenClawTray.Services.IAppCommands
                     CurrentVersion = AppVersionInfo.Version,
                     LatestVersion = releaseTag,
                     CheckedAt = DateTime.UtcNow,
-                    Detail = "skipped by user"
+                    Detail = result == UpdateDialogResult.Skip ? "skipped by user" : "remind later"
                 };
             }
             else if (userInitiated && _settings != null
@@ -3671,7 +3745,7 @@ public partial class App : Application, OpenClawTray.Services.IAppCommands
             }
 
             Logger.Info("Installing update and restarting...");
-            await AppUpdater.InstallUpdateAsync(downloadedAsset);
+            await AppUpdater.InstallUpdateAsync(downloadedAsset, forceTerminate: true, runArguments: string.Empty);
             return true;
         }
         catch (Exception ex)

@@ -44,4 +44,20 @@ public sealed class InstallerIssAssertionTests
         Assert.Contains("var mutexName = \"OpenClawTray\";", appXamlCs);
     }
 
+    [Fact]
+    public void Installer_LaunchesSetupEngineDirectlyWhenResetSetupStateIsSelected()
+    {
+        var iss = File.ReadAllText(Path.Combine(GetRepositoryRoot(), "installer.iss"));
+
+        Assert.Contains("DisableDirPage=no", iss);
+        Assert.Contains("UsePreviousAppDir=no", iss);
+        Assert.Contains("Reset setup state and show setup wizard again", iss);
+        Assert.Contains(
+            "Filename: \"{app}\\SetupEngine\\OpenClaw.SetupEngine.UI.exe\"",
+            iss);
+        Assert.Contains("Check: ShouldRunSetupEngineAfterInstall", iss);
+        Assert.Contains("function ShouldRunSetupEngineAfterInstall: Boolean;", iss);
+        Assert.Contains("function ShouldLaunchTrayAfterInstall: Boolean;", iss);
+    }
+
 }

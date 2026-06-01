@@ -63,17 +63,11 @@ public sealed class CleanupStaleDistroStep : SetupStep
             return StepResult.Ok("WSL not available or no distros — nothing to clean");
 
         // wsl.exe outputs UTF-16 with potential BOM/null chars — normalize aggressively
-        var distros = list.Stdout
-            .Replace("\0", "")
-            .Replace("\uFEFF", "")
-            .Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries)
-            .Select(d => d.Trim())
-            .Where(d => d.Length > 0)
-            .ToList();
+        var distros = ParseWslDistroList(list.Stdout, list.Stderr);
 
         ctx.Logger.Debug($"Found WSL distros: [{string.Join(", ", distros)}]");
 
-        if (!distros.Any(d => d.Equals(distro, StringComparison.OrdinalIgnoreCase)))
+        if (!ContainsDistro(distros, distro))
         {
             // Distro not registered, but disk directory may still exist from prior crash
             var wslDir = Path.Combine(ctx.LocalDataDir, "wsl", distro);
@@ -118,7 +112,7 @@ public sealed class CleanupStaleDistroStep : SetupStep
         var unregister = await ctx.Commands.RunAsync(WslConstants.WslExePath, ["--unregister", distro], TimeSpan.FromSeconds(60), ct: ct);
         if (unregister.ExitCode != 0)
         {
-            ctx.Logger.Warn($"First unregister attempt failed (exit {unregister.ExitCode}); forcing WSL shutdown and retrying");
+            ctx.Logger.Warn($"First unregister attempt failed: {BuildUnregisterFailureMessage(unregister)}; forcing WSL shutdown and retrying");
             await ctx.Commands.RunAsync(WslConstants.WslExePath, ["--shutdown"], TimeSpan.FromSeconds(30), ct: ct);
             await Task.Delay(3000, ct);
             unregister = await ctx.Commands.RunAsync(WslConstants.WslExePath, ["--unregister", distro], TimeSpan.FromSeconds(60), ct: ct);
@@ -140,7 +134,50 @@ public sealed class CleanupStaleDistroStep : SetupStep
             return StepResult.Ok($"Unregistered stale distro '{distro}'");
         }
 
-        return StepResult.Fail($"Failed to unregister distro: {unregister.Stderr}");
+        var verifyList = await ctx.Commands.RunAsync(WslConstants.WslExePath, ["--list", "--quiet"], TimeSpan.FromSeconds(15), ct: ct);
+        if (verifyList.ExitCode == 0 && !ContainsDistro(ParseWslDistroList(verifyList.Stdout, verifyList.Stderr), distro))
+        {
+            ctx.Logger.Warn($"Unregister returned a failure, but distro '{distro}' is no longer registered; continuing");
+            return StepResult.Ok($"Distro '{distro}' is no longer registered");
+        }
+
+        return StepResult.Fail($"Failed to unregister distro: {BuildUnregisterFailureMessage(unregister)}");
+    }
+
+    internal static IReadOnlyList<string> ParseWslDistroList(string stdout, string stderr)
+    {
+        var combined = $"{stdout}\n{stderr}"
+            .Replace("\0", "")
+            .Replace("\uFEFF", "");
+
+        if (combined.Contains("has no installed distributions", StringComparison.OrdinalIgnoreCase) ||
+            combined.Contains("no installed distributions", StringComparison.OrdinalIgnoreCase))
+            return [];
+
+        return combined
+            .Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries)
+            .Select(d => d.Trim().TrimStart('*').Trim())
+            .Where(d => d.Length > 0)
+            .Where(d => !d.StartsWith("Windows Subsystem for Linux", StringComparison.OrdinalIgnoreCase))
+            .Where(d => !d.StartsWith("Use 'wsl.exe", StringComparison.OrdinalIgnoreCase))
+            .Where(d => !d.StartsWith("and 'wsl.exe", StringComparison.OrdinalIgnoreCase))
+            .ToList();
+    }
+
+    private static bool ContainsDistro(IReadOnlyList<string> distros, string distro)
+        => distros.Any(d => d.Equals(distro, StringComparison.OrdinalIgnoreCase));
+
+    internal static string BuildUnregisterFailureMessage(CommandResult result)
+    {
+        var output = string.Join(" ",
+            new[] { result.Stderr, result.Stdout }
+                .Where(s => !string.IsNullOrWhiteSpace(s))
+                .Select(s => s.Replace("\0", "").Replace("\uFEFF", "").Trim()));
+
+        if (string.IsNullOrWhiteSpace(output))
+            output = result.TimedOut ? "timed out" : "no output from wsl.exe";
+
+        return $"exit {result.ExitCode}: {output}";
     }
 }
 
@@ -330,9 +367,30 @@ public sealed class PreflightWslStep : SetupStep
 
     private static string FirstUsefulLine(CommandResult result)
     {
-        var text = NormalizeWslOutput($"{result.Stderr}\n{result.Stdout}");
+        var text = WslOutput.Describe(result);
         return text.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries).FirstOrDefault()?.Trim()
             ?? "Run wsl --install from an elevated terminal and retry setup.";
+    }
+}
+
+public sealed class PreflightDiskSpaceStep : SetupStep
+{
+    public override string Id => "preflight-disk";
+    public override string DisplayName => "Check disk space";
+    public override bool CanRetry => false;
+
+    public override Task<StepResult> ExecuteAsync(SetupContext ctx, CancellationToken ct)
+    {
+        var plan = WslStoragePlanner.Plan(ctx);
+        foreach (var candidate in plan.Candidates)
+            ctx.Logger.Info($"Disk candidate: {candidate.Path} free={WslStoragePlanner.FormatBytes(candidate.FreeBytes)} usable={candidate.Usable}");
+
+        if (plan.Selected is null)
+            return Task.FromResult(StepResult.Terminal(plan.FailureMessage));
+
+        Directory.CreateDirectory(plan.Selected.WorkRoot);
+        ctx.Logger.Info($"Using WSL setup workspace: {plan.Selected.WorkRoot}");
+        return Task.FromResult(StepResult.Ok($"Disk space OK ({WslStoragePlanner.FormatBytes(plan.Selected.FreeBytes)} free)"));
     }
 }
 
@@ -405,8 +463,14 @@ public sealed class CreateWslInstanceStep : SetupStep
 
         ctx.Logger.Info($"Creating WSL distro '{distro}' from base '{baseDistro}'");
 
-        // Import as our named distro
-        var tempDir = Path.Combine(Path.GetTempPath(), $"openclaw-setup-{ctx.Logger.RunId}");
+        var storagePlan = WslStoragePlanner.Plan(ctx);
+        if (storagePlan.Selected is null)
+            return StepResult.Terminal(storagePlan.FailureMessage);
+
+        // Keep the export tar and imported VHD on the selected drive. Using
+        // %TEMP% can fail on machines with a small C: drive even when the app
+        // is installed on a larger drive.
+        var tempDir = Path.Combine(storagePlan.Selected.WorkRoot, $"setup-{ctx.Logger.RunId}");
         Directory.CreateDirectory(tempDir);
 
         try
@@ -425,7 +489,7 @@ public sealed class CreateWslInstanceStep : SetupStep
                     TimeSpan.FromMinutes(5), ct: ct);
 
                 if (install.ExitCode != 0 && !install.Stdout.Contains("already installed", StringComparison.OrdinalIgnoreCase))
-                    return StepResult.Fail($"Failed to install base distro '{baseDistro}' (exit {install.ExitCode}): {install.Stderr}");
+                    return StepResult.Fail($"Failed to install base distro '{baseDistro}' (exit {install.ExitCode}): {WslOutput.Describe(install)}");
 
                 export = await ctx.Commands.RunAsync(
                     WslConstants.WslExePath, ["--export", baseDistro, exportPath],
@@ -433,9 +497,9 @@ public sealed class CreateWslInstanceStep : SetupStep
             }
 
             if (export.ExitCode != 0)
-                return StepResult.Fail($"Failed to export base distro: {export.Stderr}");
+                return StepResult.Fail($"Failed to export base distro '{baseDistro}' (exit {export.ExitCode}): {WslOutput.Describe(export)}");
 
-            var installPath = Path.Combine(ctx.LocalDataDir, "wsl", distro);
+            var installPath = Path.Combine(storagePlan.Selected.WslRoot, distro);
             Directory.CreateDirectory(installPath);
 
             var import = await ctx.Commands.RunAsync(
@@ -443,7 +507,7 @@ public sealed class CreateWslInstanceStep : SetupStep
                 TimeSpan.FromMinutes(5), ct: ct);
 
             if (import.ExitCode != 0)
-                return StepResult.Fail($"Failed to import distro: {import.Stderr}");
+                return StepResult.Fail($"Failed to import distro '{distro}' (exit {import.ExitCode}): {WslOutput.Describe(import)}");
 
             return StepResult.Ok($"Created WSL2 distro '{distro}'");
         }
@@ -476,6 +540,87 @@ public sealed class CreateWslInstanceStep : SetupStep
         {
             Directory.Delete(wslDir);
             ctx.Logger.Info("[Uninstall] Deleted empty wsl\\ parent directory");
+        }
+    }
+}
+
+internal static class WslOutput
+{
+    public static string Describe(CommandResult result)
+    {
+        var text = Normalize($"{result.Stderr}\n{result.Stdout}").Trim();
+        return string.IsNullOrWhiteSpace(text) ? "No output from wsl.exe." : text;
+    }
+
+    private static string Normalize(string value)
+        => value.Replace("\0", "").Replace("\uFEFF", "");
+}
+
+internal static class WslStoragePlanner
+{
+    private const long RequiredFreeBytes = 12L * 1024 * 1024 * 1024;
+
+    public sealed record Candidate(string Path, string WorkRoot, string WslRoot, long FreeBytes, bool Usable);
+
+    public sealed record PlanResult(Candidate? Selected, IReadOnlyList<Candidate> Candidates, string FailureMessage);
+
+    public static PlanResult Plan(SetupContext ctx)
+    {
+        var candidates = BuildCandidates(ctx)
+            .GroupBy(c => Path.GetPathRoot(c.Path) ?? c.Path, StringComparer.OrdinalIgnoreCase)
+            .Select(g => g.OrderByDescending(c => c.Path.Equals(ctx.LocalDataDir, StringComparison.OrdinalIgnoreCase)).First())
+            .ToArray();
+
+        var selected = candidates
+            .Where(c => c.Usable && c.FreeBytes >= RequiredFreeBytes)
+            .OrderByDescending(c => c.Path.Equals(ctx.LocalDataDir, StringComparison.OrdinalIgnoreCase))
+            .ThenByDescending(c => c.FreeBytes)
+            .FirstOrDefault();
+
+        if (selected is not null)
+            return new PlanResult(selected, candidates, string.Empty);
+
+        var details = string.Join("; ", candidates.Select(c => $"{c.Path} free {FormatBytes(c.FreeBytes)}"));
+        var message = $"Not enough disk space for WSL setup. Need at least {FormatBytes(RequiredFreeBytes)} free on the setup/storage drive. {details}";
+        return new PlanResult(null, candidates, message);
+    }
+
+    public static string FormatBytes(long bytes)
+        => $"{bytes / 1024d / 1024d / 1024d:F1} GB";
+
+    private static IEnumerable<Candidate> BuildCandidates(SetupContext ctx)
+    {
+        yield return CreateCandidate(ctx.LocalDataDir, Path.Combine(ctx.LocalDataDir, "wsl-work"), Path.Combine(ctx.LocalDataDir, "wsl"));
+
+        var appDir = AppContext.BaseDirectory;
+        if (!string.IsNullOrWhiteSpace(appDir))
+        {
+            var appDataRoot = Path.Combine(appDir, "OpenClawData");
+            yield return CreateCandidate(appDataRoot, Path.Combine(appDataRoot, "wsl-work"), Path.Combine(appDataRoot, "wsl"));
+        }
+
+        var tempPath = Path.GetTempPath();
+        if (!string.IsNullOrWhiteSpace(tempPath))
+        {
+            var tempRoot = Path.Combine(tempPath, "OpenClawTray");
+            yield return CreateCandidate(tempRoot, Path.Combine(tempRoot, "wsl-work"), Path.Combine(ctx.LocalDataDir, "wsl"));
+        }
+    }
+
+    private static Candidate CreateCandidate(string path, string workRoot, string wslRoot)
+    {
+        try
+        {
+            var root = Path.GetPathRoot(Path.GetFullPath(path));
+            if (string.IsNullOrWhiteSpace(root))
+                return new Candidate(path, workRoot, wslRoot, 0, false);
+
+            var drive = new DriveInfo(root);
+            return new Candidate(path, workRoot, wslRoot, drive.AvailableFreeSpace, drive.IsReady);
+        }
+        catch
+        {
+            return new Candidate(path, workRoot, wslRoot, 0, false);
         }
     }
 }
@@ -861,7 +1006,6 @@ public sealed class ConfigureGatewayStep : SetupStep
         {
             ctx.Logger.Info($"Configured device-pair public URL for loopback gateway: {defaultPublicUrl}");
         }
-
         var pathPrefix = ctx.WslPathPrefix;
         var script = $"""
             set -e
@@ -872,10 +1016,14 @@ public sealed class ConfigureGatewayStep : SetupStep
             echo "GATEWAY_CONFIGURED"
             """;
 
-        var result = await ctx.Commands.RunInWslAsync(distro, script, TimeSpan.FromSeconds(30), env, ct);
+        // Each `openclaw config set` starts the Node-based CLI. On a fresh WSL
+        // distro that can take several seconds per setting, so keep this
+        // timeout large enough for the whole batch instead of killing a valid
+        // setup midway through.
+        var result = await ctx.Commands.RunInWslAsync(distro, script, TimeSpan.FromMinutes(3), env, ct);
 
         if (result.ExitCode != 0 || !result.Stdout.Contains("GATEWAY_CONFIGURED"))
-            return StepResult.Fail($"Gateway configuration failed (exit {result.ExitCode}): {result.Stderr}");
+            return StepResult.Fail($"Gateway configuration failed (exit {result.ExitCode}): {DescribeCommandOutput(result)}");
 
         ctx.Logger.StateChange("shared_gateway_token", null, "[SET]");
         return StepResult.Ok("Gateway configured");
@@ -893,6 +1041,9 @@ public sealed class ConfigureGatewayStep : SetupStep
             openclaw config set gateway.nodes.allowCommands {escapedAllowedCommands}
             """;
 
+        // `openclaw qr --json` requires a public URL when the gateway is bound
+        // to loopback. For local Windows setup, the loopback URL is the correct
+        // target for QR/bootstrap pairing.
         if (GetDefaultDevicePairPublicUrl(gw, port) is { } defaultPublicUrl &&
             gw.ExtraConfig?.ContainsKey(DevicePairPublicUrlKey) != true)
         {
@@ -915,13 +1066,25 @@ public sealed class ConfigureGatewayStep : SetupStep
         return configCommands;
     }
 
-    internal static string? GetDefaultDevicePairPublicUrl(GatewayConfig gw, int port) =>
-        gw.Bind == "loopback" ? $"http://127.0.0.1:{port}" : null;
-
     private static string ShellEscape(string value) => "'" + value.Replace("'", "'\\''") + "'";
 
     internal static bool IsSafeExtraConfigKey(string value)
         => System.Text.RegularExpressions.Regex.IsMatch(value, "^[A-Za-z0-9._-]+$");
+
+    internal static string? GetDefaultDevicePairPublicUrl(GatewayConfig gw, int port) =>
+        gw.Bind == "loopback" ? $"http://127.0.0.1:{port}" : null;
+
+    private static string DescribeCommandOutput(CommandResult result)
+    {
+        var details = string.Join(
+            "\n",
+            new[] { result.Stderr.Trim(), result.Stdout.Trim() }.Where(s => !string.IsNullOrWhiteSpace(s)));
+
+        if (string.IsNullOrWhiteSpace(details))
+            details = result.TimedOut ? "Command timed out with no output." : "No command output.";
+
+        return result.TimedOut ? $"Timed out. {details}" : details;
+    }
 }
 
 public sealed class InstallGatewayServiceStep : SetupStep
@@ -1840,11 +2003,9 @@ public sealed class PairNodeStep : SetupStep
         var token = ctx.SharedGatewayToken ?? ctx.BootstrapToken ?? throw new InvalidOperationException("No gateway token available for auto-approve");
 
         var env = new Dictionary<string, string> { ["OPENCLAW_GATEWAY_TOKEN"] = token };
-        var approvalKind = ApprovalRequestKind.Device;
 
         if (string.IsNullOrWhiteSpace(requestId))
         {
-            approvalKind = ApprovalRequestKind.Node;
             var pending = await ctx.Commands.RunInWslAsync(
                 distro,
                 $"""{ctx.WslPathPrefix} && openclaw nodes list --json""",
@@ -1868,20 +2029,94 @@ public sealed class PairNodeStep : SetupStep
         if (!ApprovalRequestHelper.IsSafeRequestId(requestId))
             return StepResult.Fail("Node pairing request ID contained unsafe characters");
 
-        ctx.Logger.Info($"Approving node pairing request: {requestId}");
+        var gatewayApprove = await ApproveNodeRoleUpgradeViaGatewayAsync(ctx, requestId!, ct);
+        if (gatewayApprove.IsSuccess)
+            return gatewayApprove;
+
+        ctx.Logger.Warn($"Gateway role-upgrade approval failed; falling back to node CLI approval: {gatewayApprove.Message}");
+        ctx.Logger.Info($"Approving node pairing request via CLI: {requestId}");
         var approvalEnv = ApprovalRequestHelper.AddRequestIdEnvironment(env, requestId!);
 
         var approve = await ctx.Commands.RunInWslAsync(
             distro,
-            $"""{ctx.WslPathPrefix} && {ApprovalRequestHelper.ApprovalCommand(approvalKind)}""",
+            $"""{ctx.WslPathPrefix} && {BuildNodeApprovalCommand()}""",
             TimeSpan.FromSeconds(30), approvalEnv, ct);
 
         ctx.Logger.Info($"Node approve result: exit={approve.ExitCode}");
 
         return approve.ExitCode == 0
             ? StepResult.Ok($"Node approved: {requestId}")
-            : StepResult.Fail($"Node approval failed (exit {approve.ExitCode}): {approve.Stdout.Trim()}");
+            : StepResult.Fail($"Node approval failed (exit {approve.ExitCode}): {DescribeApprovalFailure(approve)}");
     }
+
+    internal const string NodeRoleUpgradeApprovalMethod = "device.pair.approve";
+
+    private static async Task<StepResult> ApproveNodeRoleUpgradeViaGatewayAsync(SetupContext ctx, string requestId, CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(ctx.GatewayUrl))
+            return StepResult.Fail("Gateway URL is not available for node role-upgrade approval");
+        if (string.IsNullOrWhiteSpace(ctx.GatewayRecordId))
+            return StepResult.Fail("Gateway record is not available for node role-upgrade approval");
+
+        var registry = new GatewayRegistry(ctx.DataDir);
+        registry.Load();
+        var record = registry.GetById(ctx.GatewayRecordId);
+        if (record == null)
+            return StepResult.Fail($"Gateway record {ctx.GatewayRecordId} not found for node role-upgrade approval");
+
+        var token = ctx.SharedGatewayToken ?? record.SharedGatewayToken ?? ctx.BootstrapToken ?? record.BootstrapToken;
+        if (string.IsNullOrWhiteSpace(token))
+            return StepResult.Fail("Gateway token is not available for node role-upgrade approval");
+
+        var identityPath = registry.GetIdentityDirectory(record.Id);
+        var wsLogger = new SetupOpenClawLogger(ctx.Logger);
+        OpenClawGatewayClient? client = null;
+
+        try
+        {
+            client = new OpenClawGatewayClient(ctx.GatewayUrl, token, logger: wsLogger, identityPath: identityPath);
+            client.UseV2Signature = true;
+
+            var connection = await PairOperatorStep.WaitForConnectionOrPairing(client, ctx, TimeSpan.FromSeconds(15), ct);
+            if (connection != PairOperatorStep.ConnectionOutcome.Connected)
+                return StepResult.Fail($"Operator approval channel could not connect: {connection}");
+
+            ctx.Logger.Info($"Approving node role-upgrade request via {NodeRoleUpgradeApprovalMethod}: {requestId}");
+            await client.SendWizardRequestAsync(NodeRoleUpgradeApprovalMethod, new { requestId }, timeoutMs: 15000);
+            return StepResult.Ok($"Node role-upgrade approved: {requestId}");
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            return StepResult.Fail($"Node role-upgrade approval failed: {ex.Message}", ex);
+        }
+        finally
+        {
+            if (client != null)
+            {
+                await client.DisconnectAsync();
+                client.Dispose();
+            }
+        }
+    }
+
+    private static string DescribeApprovalFailure(CommandResult result)
+    {
+        var details = string.Join(
+            "\n",
+            new[] { result.Stderr.Trim(), result.Stdout.Trim() }.Where(s => !string.IsNullOrWhiteSpace(s)));
+
+        if (string.IsNullOrWhiteSpace(details))
+            details = result.TimedOut ? "Command timed out with no output." : "No command output.";
+
+        return details;
+    }
+
+    internal static string BuildNodeApprovalCommand()
+        => ApprovalRequestHelper.ApprovalCommand(ApprovalRequestKind.Node);
 
     private static void RegisterCapabilitiesFromConfig(WindowsNodeClient client, SetupContext ctx)
     {

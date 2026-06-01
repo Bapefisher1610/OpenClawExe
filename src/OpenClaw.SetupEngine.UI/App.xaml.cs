@@ -1,4 +1,5 @@
 using Microsoft.UI.Xaml;
+using System.IO;
 
 namespace OpenClaw.SetupEngine.UI;
 
@@ -13,7 +14,28 @@ public partial class App : Application
 
     protected override void OnLaunched(LaunchActivatedEventArgs args)
     {
-        MainWindow = new SetupWindow();
-        MainWindow.BringToFrontForSetupLaunch();
+        try
+        {
+            MainWindow = new SetupWindow();
+            MainWindow.BringToFrontForSetupLaunch();
+        }
+        catch (Exception ex)
+        {
+            try
+            {
+                var dir = Path.Combine(
+                    Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                    "OpenClawTray");
+                Directory.CreateDirectory(dir);
+                File.AppendAllText(
+                    Path.Combine(dir, "setup-ui-crash.log"),
+                    $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] {ex}\n");
+            }
+            catch
+            {
+            }
+
+            throw;
+        }
     }
 }

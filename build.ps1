@@ -6,7 +6,7 @@
     Builds all projects, checks prerequisites, and provides clear guidance.
 
 .PARAMETER Project
-    Which project to build: All, Tray, WinUI, Shared, CommandPalette, Cli
+    Which project to build: All, Tray, WinUI, Shared, CommandPalette, Cli, SetupEngine, Installer
     Default: All
 
 .PARAMETER Configuration
@@ -23,7 +23,7 @@
 #>
 
 param(
-    [ValidateSet("All", "Tray", "WinUI", "Shared", "CommandPalette", "Cli", "WinNodeCli", "SetupEngine")]
+    [ValidateSet("All", "Tray", "WinUI", "Shared", "CommandPalette", "Cli", "WinNodeCli", "SetupEngine", "Installer")]
     [string]$Project = "All",
     
     [ValidateSet("Debug", "Release")]
@@ -197,6 +197,132 @@ function Get-ProjectTargetFramework($path) {
         Select-Object -First 1
 }
 
+function Resolve-InnoCompiler {
+    $candidates = @()
+
+    if ($env:INNOSETUP_ISCC) {
+        $candidates += $env:INNOSETUP_ISCC
+    }
+
+    $pathCommand = Get-Command ISCC.exe -ErrorAction SilentlyContinue
+    if ($pathCommand) {
+        $candidates += $pathCommand.Source
+    }
+
+    $candidates += @(
+        "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe",
+        "${env:ProgramFiles}\Inno Setup 6\ISCC.exe",
+        "${env:LOCALAPPDATA}\Programs\Inno Setup 6\ISCC.exe",
+        "${env:LOCALAPPDATA}\Inno Setup 6\ISCC.exe"
+    )
+
+    $wildcardCandidates = @(
+        "${env:LOCALAPPDATA}\Programs\*\resources\app\node_modules\innosetup\bin\ISCC.exe",
+        "${env:LOCALAPPDATA}\Programs\*\*\resources\app\node_modules\innosetup\bin\ISCC.exe"
+    )
+    foreach ($pattern in $wildcardCandidates) {
+        $match = Resolve-Path $pattern -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($match) {
+            $candidates += $match.Path
+        }
+    }
+
+    foreach ($candidate in $candidates) {
+        if (-not [string]::IsNullOrWhiteSpace($candidate) -and (Test-Path $candidate)) {
+            return (Resolve-Path $candidate).Path
+        }
+    }
+
+    return $null
+}
+
+function Publish-Project($name, $path, $output, $runtimeIdentifier) {
+    Write-Host "`nPublishing $name..." -ForegroundColor White
+    if (Test-Path $output) {
+        foreach ($child in Get-ChildItem -LiteralPath $output -Force) {
+            if ($child.Name -eq "OpenClawData") {
+                continue
+            }
+
+            if ($child.PSIsContainer) {
+                foreach ($nested in Get-ChildItem -LiteralPath $child.FullName -Force) {
+                    if ($nested.Name -eq "OpenClawData") {
+                        continue
+                    }
+
+                    Remove-Item -LiteralPath $nested.FullName -Recurse -Force
+                }
+
+                if (-not (Get-ChildItem -LiteralPath $child.FullName -Force | Select-Object -First 1)) {
+                    Remove-Item -LiteralPath $child.FullName -Force
+                }
+            } else {
+                Remove-Item -LiteralPath $child.FullName -Force
+            }
+        }
+    }
+    New-Item -ItemType Directory -Path $output -Force | Out-Null
+
+    $result = & dotnet publish $path -c $Configuration -r $runtimeIdentifier --self-contained true --no-restore -o $output 2>&1
+    $exitCode = $LASTEXITCODE
+    if ($exitCode -ne 0) {
+        Write-Error "$name publish failed"
+        $result | Select-String "error" | Select-Object -First 8 | ForEach-Object {
+            Write-Info $_.Line
+        }
+        return $false
+    }
+
+    Write-Success "$name published to $output"
+    return $true
+}
+
+function Build-Installer($runtimeIdentifier) {
+    Write-Header "Building Installer"
+
+    $iscc = Resolve-InnoCompiler
+    if (-not $iscc) {
+        Write-Error "ISCC.exe not found. Install Inno Setup 6 or set INNOSETUP_ISCC to the full ISCC.exe path."
+        Write-Info "Expected paths include:"
+        Write-Info "- C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
+        Write-Info "- C:\Program Files\Inno Setup 6\ISCC.exe"
+        return $false
+    }
+
+    Write-Success "Inno Setup compiler: $iscc"
+
+    $publishDir = if ($runtimeIdentifier -eq "win-arm64") { "publish-installer-arm64" } else { "publish-installer-x64" }
+    $appArch = if ($runtimeIdentifier -eq "win-arm64") { "arm64" } else { "x64" }
+    $version = if ($env:OPENCLAW_BUILD_VERSION) { $env:OPENCLAW_BUILD_VERSION } else { "0.0.0" }
+
+    $trayProject = "src/OpenClaw.Tray.WinUI/OpenClaw.Tray.WinUI.csproj"
+    $setupProject = "src/OpenClaw.SetupEngine.UI/OpenClaw.SetupEngine.UI.csproj"
+    $setupPublishDir = Join-Path $publishDir "SetupEngine"
+
+    if (-not (Publish-Project "OpenClaw Tray" $trayProject $publishDir $runtimeIdentifier)) {
+        return $false
+    }
+    if (-not (Publish-Project "SetupEngine.UI" $setupProject $setupPublishDir $runtimeIdentifier)) {
+        return $false
+    }
+
+    Write-Host "`nRunning Inno Setup compiler..." -ForegroundColor White
+    & $iscc "/DMyAppVersion=$version" "/DMyAppArch=$appArch" "/Dpublish=$publishDir" "installer.iss"
+    if ($LASTEXITCODE -ne 0) {
+        Write-Error "ISCC.exe failed with exit code $LASTEXITCODE"
+        return $false
+    }
+
+    $installerPath = Join-Path "Output" "OpenClawTray-Setup-$appArch.exe"
+    if (-not (Test-Path $installerPath)) {
+        Write-Error "Installer build finished but $installerPath was not created."
+        return $false
+    }
+
+    Write-Success "Installer created: $installerPath"
+    return $true
+}
+
 $projects = @{
     "Shared" = @{ Path = "src/OpenClaw.Shared/OpenClaw.Shared.csproj"; UseRid = $false }
     "Cli" = @{ Path = "src/OpenClaw.Cli/OpenClaw.Cli.csproj"; UseRid = $false }
@@ -205,6 +331,15 @@ $projects = @{
     "WinUI" = @{ Path = "src/OpenClaw.Tray.WinUI/OpenClaw.Tray.WinUI.csproj"; UseRid = $true }
     "CommandPalette" = @{ Path = "src/OpenClaw.CommandPalette/OpenClaw.CommandPalette.csproj"; UseRid = $false }
     "SetupEngine" = @{ Path = "src/OpenClaw.SetupEngine.UI/OpenClaw.SetupEngine.UI.csproj"; UseRid = $true }
+}
+
+if ($Project -eq "Installer") {
+    if (Build-Installer $rid) {
+        Write-Host ""
+        exit 0
+    }
+
+    exit 1
 }
 
 $toBuild = if ($Project -eq "All") { @("Shared", "Cli", "WinNodeCli", "SetupEngine", "WinUI") } else { @($Project) }
