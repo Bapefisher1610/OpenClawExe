@@ -1,6 +1,7 @@
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using OpenClaw.Connection;
+using OpenClaw.Shared;
 using OpenClawTray.Services;
 using System;
 using System.Diagnostics;
@@ -48,7 +49,13 @@ public sealed partial class AIProviderPage : Page
         UpdateOpenAICodexOAuthVisibility();
     }
 
-    private async void OnSave(object sender, RoutedEventArgs e)
+    private void OnSave(object sender, RoutedEventArgs e) =>
+        AsyncEventHandlerGuard.Run(
+            OnSaveAsync,
+            new AppLogger(),
+            nameof(OnSave));
+
+    private async Task OnSaveAsync()
     {
         if (_busy) return;
 
@@ -97,10 +104,11 @@ public sealed partial class AIProviderPage : Page
         }
     }
 
-    private async void OnRefreshStatus(object sender, RoutedEventArgs e)
-    {
-        await RefreshProviderStatusAsync();
-    }
+    private void OnRefreshStatus(object sender, RoutedEventArgs e) =>
+        AsyncEventHandlerGuard.Run(
+            RefreshProviderStatusAsync,
+            new AppLogger(),
+            nameof(OnRefreshStatus));
 
     private void OnOpenConnection(object sender, RoutedEventArgs e)
         => ((IAppCommands)CurrentApp).Navigate("connection");
@@ -108,7 +116,13 @@ public sealed partial class AIProviderPage : Page
     private void OnOpenUsage(object sender, RoutedEventArgs e)
         => ((IAppCommands)CurrentApp).Navigate("usage");
 
-    private async void OnOpenAICodexOAuthLogin(object sender, RoutedEventArgs e)
+    private void OnOpenAICodexOAuthLogin(object sender, RoutedEventArgs e) =>
+        AsyncEventHandlerGuard.Run(
+            OnOpenAICodexOAuthLoginAsync,
+            new AppLogger(),
+            nameof(OnOpenAICodexOAuthLogin));
+
+    private async Task OnOpenAICodexOAuthLoginAsync()
     {
         if (_busy) return;
 
@@ -152,7 +166,13 @@ public sealed partial class AIProviderPage : Page
         }
     }
 
-    private async void OnUseSelectedOAuthProfile(object sender, RoutedEventArgs e)
+    private void OnUseSelectedOAuthProfile(object sender, RoutedEventArgs e) =>
+        AsyncEventHandlerGuard.Run(
+            OnUseSelectedOAuthProfileAsync,
+            new AppLogger(),
+            nameof(OnUseSelectedOAuthProfile));
+
+    private async Task OnUseSelectedOAuthProfileAsync()
     {
         if (_busy) return;
 

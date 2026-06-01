@@ -62,13 +62,14 @@ public sealed partial class WizardPage : Page
             _stepVisits.Clear();
             SetBusy("Connecting to gateway...");
             _client = await ConnectClientAsync();
+            _client.StatusChanged += OnWizardClientStatusChanged;
             SetBusy("Starting wizard...");
             var payload = await _client.SendWizardRequestAsync("wizard.start", timeoutMs: 30_000);
             await ApplyPayloadAsync(payload);
         }
         catch (Exception ex)
         {
-            ShowError($"Gateway wizard failed: {ex.Message}");
+            await EnterWizardErrorAsync($"Gateway wizard failed: {ex.Message}");
         }
     }
 
@@ -125,6 +126,25 @@ public sealed partial class WizardPage : Page
         {
             client.StatusChanged -= OnStatusChanged;
         }
+    }
+
+    private void OnWizardClientStatusChanged(object? sender, ConnectionStatus status)
+    {
+        if (status is not (ConnectionStatus.Disconnected or ConnectionStatus.Error))
+            return;
+
+        DispatcherQueue.TryEnqueue(() =>
+        {
+            if (_errorState
+                || _client == null
+                || !ReferenceEquals(sender, _client)
+                || string.IsNullOrWhiteSpace(_sessionId))
+            {
+                return;
+            }
+
+            _ = EnterWizardErrorAsync("Gateway connection was lost while the wizard was running.");
+        });
     }
 
     private async Task ApplyPayloadAsync(JsonElement payload)
@@ -351,7 +371,13 @@ public sealed partial class WizardPage : Page
             : new SolidColorBrush(Microsoft.UI.Colors.Gray);
     }
 
-    private async void Primary_Click(object sender, RoutedEventArgs e)
+    private void Primary_Click(object sender, RoutedEventArgs e) =>
+        AsyncEventHandlerGuard.Run(
+            PrimaryClickAsync,
+            NullLogger.Instance,
+            nameof(Primary_Click));
+
+    private async Task PrimaryClickAsync()
     {
         if (_errorState)
         {
@@ -362,7 +388,13 @@ public sealed partial class WizardPage : Page
         await SendCurrentAnswerAsync(skip: false);
     }
 
-    private async void Secondary_Click(object sender, RoutedEventArgs e)
+    private void Secondary_Click(object sender, RoutedEventArgs e) =>
+        AsyncEventHandlerGuard.Run(
+            SecondaryClickAsync,
+            NullLogger.Instance,
+            nameof(Secondary_Click));
+
+    private async Task SecondaryClickAsync()
     {
         if (_errorState)
         {
@@ -396,7 +428,7 @@ public sealed partial class WizardPage : Page
         }
         catch (Exception ex)
         {
-            ShowError(ex.Message);
+            await EnterWizardErrorAsync(ex.Message);
         }
     }
 
@@ -1145,11 +1177,21 @@ public sealed partial class WizardPage : Page
         StatusText.Text = "Wizard needs attention";
         ErrorText.Text = message;
         ErrorText.Visibility = Visibility.Visible;
-        PrimaryButton.Content = "Retry";
+        PrimaryButton.Content = "Start wizard again";
         PrimaryButton.IsEnabled = true;
         SecondaryButton.Content = "Skip wizard";
         SecondaryButton.IsEnabled = true;
         SecondaryButton.Visibility = Visibility.Visible;
+    }
+
+    private async Task EnterWizardErrorAsync(string detail)
+    {
+        if (_errorState)
+            return;
+
+        _errorState = true;
+        await DisconnectAsync();
+        ShowError(detail);
     }
 
     private async Task SkipWizardAsync()
@@ -1181,10 +1223,12 @@ public sealed partial class WizardPage : Page
 
     private async Task DisconnectAsync()
     {
-        if (_client == null) return;
-        try { await _client.DisconnectAsync(); } catch { }
-        _client.Dispose();
+        var client = _client;
+        if (client == null) return;
         _client = null;
+        client.StatusChanged -= OnWizardClientStatusChanged;
+        try { await client.DisconnectAsync(); } catch { }
+        client.Dispose();
     }
 
     private static string? ResolveLocalDistroName()

@@ -61,6 +61,11 @@ public class SetupPipelineTests
         var steps = SetupStepFactory.BuildDefaultSteps();
 
         Assert.Equal(19, steps.Count);
+        Assert.IsType<PreflightOsStep>(steps[0]);
+        Assert.IsType<PreflightWslStep>(steps[1]);
+        Assert.IsType<PreflightDiskSpaceStep>(steps[2]);
+        Assert.IsType<CleanupStaleDistroStep>(steps[3]);
+        Assert.IsType<CleanupStaleGatewayStep>(steps[4]);
         Assert.Contains(steps, s => s is ValidateWslLockdownStep);
         Assert.Contains(steps, s => s is PreflightDiskSpaceStep);
         Assert.Contains(steps, s => s is RunGatewayWizardStep);

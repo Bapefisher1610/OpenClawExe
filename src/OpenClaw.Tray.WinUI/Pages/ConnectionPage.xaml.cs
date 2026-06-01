@@ -30,7 +30,7 @@ namespace OpenClawTray.Pages;
 public sealed partial class ConnectionPage : Page
 {
     // ─── DI / services ───
-    private static App CurrentApp => (App)Microsoft.UI.Xaml.Application.Current;
+    private static App CurrentApp => (App)Microsoft.UI.Xaml.Application.Current!;
     private AppState? _appState;
     private IGatewayConnectionManager? _connectionManager;
     private GatewayRegistry? _gatewayRegistry;
@@ -88,7 +88,7 @@ public sealed partial class ConnectionPage : Page
 
     public void Initialize()
     {
-        _appState = ((App)Application.Current).AppState;
+        _appState = ((App)Application.Current!).AppState!;
         _appState.PropertyChanged += OnAppStateChanged;
         _connectionManager = CurrentApp.ConnectionManager;
         _gatewayRegistry = CurrentApp.Registry;
@@ -1503,7 +1503,13 @@ public sealed partial class ConnectionPage : Page
         RefreshFromSnapshot(_lastSnapshot);
     }
 
-    private async void OnApplyRepairCode(object sender, RoutedEventArgs e)
+    private void OnApplyRepairCode(object sender, RoutedEventArgs e) =>
+        AsyncEventHandlerGuard.Run(
+            OnApplyRepairCodeAsync,
+            new OpenClawTray.AppLogger(),
+            nameof(OnApplyRepairCode));
+
+    private async Task OnApplyRepairCodeAsync()
     {
         var code = RecoveryRepairCodeBox.Text?.Trim();
         if (string.IsNullOrEmpty(code) || _connectionManager == null) return;
@@ -1522,7 +1528,13 @@ public sealed partial class ConnectionPage : Page
 
     // ─── Saved-gateway row actions ───────────────────────────────────
 
-    private async void OnConnectSavedGateway(object sender, RoutedEventArgs e)
+    private void OnConnectSavedGateway(object sender, RoutedEventArgs e) =>
+        AsyncEventHandlerGuard.Run(
+            () => OnConnectSavedGatewayAsync(sender),
+            new OpenClawTray.AppLogger(),
+            nameof(OnConnectSavedGateway));
+
+    private async Task OnConnectSavedGatewayAsync(object sender)
     {
         if (sender is not Button btn || btn.Tag is not string gwId) return;
         if (_gatewayRegistry == null || _connectionManager == null) return;
@@ -1603,7 +1615,13 @@ public sealed partial class ConnectionPage : Page
         RefreshFromSnapshot(_lastSnapshot);
     }
 
-    private async void OnSavedRowRemove(object sender, RoutedEventArgs e)
+    private void OnSavedRowRemove(object sender, RoutedEventArgs e) =>
+        AsyncEventHandlerGuard.Run(
+            () => OnSavedRowRemoveAsync(sender),
+            new OpenClawTray.AppLogger(),
+            nameof(OnSavedRowRemove));
+
+    private async Task OnSavedRowRemoveAsync(object sender)
     {
         if (sender is not MenuFlyoutItem item || item.Tag is not string gwId) return;
         var rec = _gatewayRegistry?.GetById(gwId);
@@ -1744,7 +1762,13 @@ public sealed partial class ConnectionPage : Page
         }
     }
 
-    private async void OnAddSave(object sender, RoutedEventArgs e)
+    private void OnAddSave(object sender, RoutedEventArgs e) =>
+        AsyncEventHandlerGuard.Run(
+            OnAddSaveAsync,
+            new OpenClawTray.AppLogger(),
+            nameof(OnAddSave));
+
+    private async Task OnAddSaveAsync()
     {
         var tag = ActiveAddPaneTag();
         AddResultText.Text = "";
@@ -2055,10 +2079,10 @@ public sealed partial class ConnectionPage : Page
 
         if (settings != null)
         {
-            settings.GatewayUrl = prevGatewayUrl;
+            settings.GatewayUrl = prevGatewayUrl ?? string.Empty;
             settings.UseSshTunnel = prevUseSsh;
-            settings.SshTunnelUser = prevSshUser;
-            settings.SshTunnelHost = prevSshHost;
+            settings.SshTunnelUser = prevSshUser ?? string.Empty;
+            settings.SshTunnelHost = prevSshHost ?? string.Empty;
             settings.SshTunnelRemotePort = prevSshRemotePort;
             settings.SshTunnelLocalPort = prevSshLocalPort;
             settings.Save();
@@ -2161,7 +2185,13 @@ public sealed partial class ConnectionPage : Page
     /// Welcome inline Scan button. Toggles scan on/off; on completion
     /// populates whichever discovered-list panel is visible.
     /// </summary>
-    private async void OnScanGatewaysClicked(object sender, RoutedEventArgs e)
+    private void OnScanGatewaysClicked(object sender, RoutedEventArgs e) =>
+        AsyncEventHandlerGuard.Run(
+            OnScanGatewaysClickedAsync,
+            new OpenClawTray.AppLogger(),
+            nameof(OnScanGatewaysClicked));
+
+    private async Task OnScanGatewaysClickedAsync()
     {
         if (_scanInProgress)
         {
@@ -2446,7 +2476,7 @@ public sealed partial class ConnectionPage : Page
             // could act on the wrong one — disable those rows so the user
             // is forced to approve via the gateway-host CLI instead.
             var ambiguousIds = ComputeAmbiguousFallbackIds(
-                data.Pending.Select(r => (r.RequestId, r.DeviceId)));
+                data.Pending.Select(r => (RequestId: (string?)r.RequestId, FallbackId: (string?)r.DeviceId)));
             foreach (var req in data.Pending)
             {
                 bool ambiguous = req.RequestId == null
@@ -2472,7 +2502,7 @@ public sealed partial class ConnectionPage : Page
             // the same NodeId and no RequestId, disable approve/deny on
             // those rows so the user can't pick the wrong target.
             var ambiguousIds = ComputeAmbiguousFallbackIds(
-                data.Pending.Select(r => (r.RequestId, NodeId: r.NodeId)));
+                data.Pending.Select(r => (RequestId: (string?)r.RequestId, FallbackId: (string?)r.NodeId)));
             foreach (var req in data.Pending)
             {
                 bool ambiguous = req.RequestId == null
